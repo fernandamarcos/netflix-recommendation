@@ -157,16 +157,16 @@ coef_df = coef_df.sort_values('abs_coefficient', ascending=False)
 print("\n=== Feature Coefficients ===")
 print(coef_df[['feature', 'coefficient']].to_string(index=False))
 
-print("\n=== Top positive features ===")
-print(
-    coef_df.sort_values('coefficient', ascending=False)[['feature', 'coefficient']]
-    .head(10)
-    .to_string(index=False)
-)
+# print("\n=== Top positive features ===")
+# print(
+#     coef_df.sort_values('coefficient', ascending=False)[['feature', 'coefficient']]
+#     .head(10)
+#     .to_string(index=False)
+# )
 
-print("\n=== Top negative features ===")
-print(
-    coef_df.sort_values('coefficient', ascending=True)[['feature', 'coefficient']]
-    .head(10)
-    .to_string(index=False)
-)
+# print("\n=== Top negative features ===")
+# print(
+#     coef_df.sort_values('coefficient', ascending=True)[['feature', 'coefficient']]
+#     .head(10)
+#     .to_string(index=False)
+# )
