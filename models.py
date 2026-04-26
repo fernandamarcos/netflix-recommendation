@@ -39,10 +39,10 @@ from sklearn.ensemble import (
     GradientBoostingRegressor,
 )
 from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, FunctionTransformer, MinMaxScaler
 
 from baselines import PopularityBaseline
 
@@ -53,19 +53,23 @@ from baselines import PopularityBaseline
 class NMFRanker:
     """
     Rankea directamente por el score reconstruido por NMF (columna 'nmf_score'
-    del feature set generado por data_loader). NO entrena nada — es un lector
-    de una feature ya computada.
-
-    Util para ver cuanta senal trae por si solo el NMF.
+    del feature set generado por data_loader). No es un modelo de ML. 
+    Simplemente toma el 'nmf_score' precalculado y lo devuelve. 
+    Permite comparar el performance puro de la factorizacion.
     """
     def __init__(self, task: str = "classification"):
         self.task = task
+        self.scaler = LinearRegression()
 
     def fit(self, X, y):
+        self.scaler.fit(X[["nmf_score"]], y)
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return X["nmf_score"].values.astype(float)
+        raw_scores = X[["nmf_score"]]
+        if self.task == "regression":
+            return self.scaler.predict(raw_scores).flatten()
+        return raw_scores.values.flatten()
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         # Convertimos score (rango aprox 0.5–5.0) a probabilidad [0,1]
@@ -81,7 +85,7 @@ def _logistic_pipeline() -> Pipeline:
     return Pipeline([
         ("imputer", SimpleImputer(strategy="mean")),
         ("scaler", StandardScaler()),
-        ("model", LogisticRegression(max_iter=1000, C=1.0)),
+        ("model", LogisticRegression(max_iter=1000, C=0.01)),
     ])
 
 
@@ -89,7 +93,7 @@ def _linear_pipeline() -> Pipeline:
     return Pipeline([
         ("imputer", SimpleImputer(strategy="mean")),
         ("scaler", StandardScaler()),
-        ("model", LinearRegression()),
+        ("model", Ridge(alpha=1000.0)),
     ])
 
 
@@ -98,10 +102,10 @@ def _gbm_classifier() -> Pipeline:
         ("imputer", SimpleImputer(strategy="mean")),
         # el boosting no necesita StandardScaler, lo omito
         ("model", GradientBoostingClassifier(
-            n_estimators=200,
+            n_estimators=50,
             max_depth=3,
-            learning_rate=0.05,
-            subsample=0.8,
+            learning_rate=0.1,
+            subsample=1.0,
             random_state=42,
         )),
     ])
@@ -111,10 +115,11 @@ def _gbm_regressor() -> Pipeline:
     return Pipeline([
         ("imputer", SimpleImputer(strategy="mean")),
         ("model", GradientBoostingRegressor(
-            n_estimators=200,
+            n_estimators=50,
             max_depth=3,
-            learning_rate=0.05,
-            subsample=0.8,
+            learning_rate=0.1,
+            subsample=1.0,
+            min_samples_split=20,
             random_state=42,
         )),
     ])
@@ -125,11 +130,11 @@ def _mlp_classifier() -> Pipeline:
         ("imputer", SimpleImputer(strategy="mean")),
         ("scaler", StandardScaler()),
         ("model", MLPClassifier(
-            hidden_layer_sizes=(64, 32),
+            hidden_layer_sizes=(32, 16),
             activation="relu",
             solver="adam",
-            alpha=1e-4,           # L2
-            learning_rate_init=1e-3,
+            alpha=0.1,           # L2
+            learning_rate_init=0.01,
             max_iter=300,
             early_stopping=True,
             validation_fraction=0.1,
@@ -147,12 +152,35 @@ def _mlp_regressor() -> Pipeline:
             hidden_layer_sizes=(64, 32),
             activation="relu",
             solver="adam",
-            alpha=1e-4,
-            learning_rate_init=1e-3,
+            alpha=0.1,
+            learning_rate_init=0.005,
             max_iter=300,
             early_stopping=True,
             validation_fraction=0.1,
             n_iter_no_change=10,
+            random_state=42,
+        )),
+    ])
+
+
+def _select_stacked_features(X: pd.DataFrame) -> pd.DataFrame:
+    features = ["nmf_score", "user_sim_score"]
+    return X[features]
+
+
+def _stacked_mlp_regressor() -> Pipeline:
+    return Pipeline([
+        ("selector", FunctionTransformer(_select_stacked_features, validate=False)),
+        ("imputer", SimpleImputer(strategy="mean")),
+        ("scaler", StandardScaler()),
+        ("model", MLPRegressor(
+            hidden_layer_sizes=(16,),
+            activation="relu",
+            solver="adam",
+            alpha=1e-3,
+            learning_rate_init=1e-3,
+            max_iter=300,
+            early_stopping=True,
             random_state=42,
         )),
     ])
@@ -181,6 +209,7 @@ def build_models(task: str) -> Dict[str, object]:
             "LinearRegression": _linear_pipeline(),
             "GradientBoosting": _gbm_regressor(),
             "MLP": _mlp_regressor(),
+            "NMF + NN (stacked)": _stacked_mlp_regressor(),
         }
     else:
         raise ValueError(f"task desconocida: {task!r}")
