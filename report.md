@@ -1,172 +1,171 @@
-# Informe - Sistema de recomendacion sobre MovieLens
+# Report — MovieLens recommender system
 
-## 1. Problema
+## 1. Problem
 
-Dado un usuario, devolver una **lista top-10 de peliculas** que no ha visto
-y que tenga alta probabilidad de que le gusten.
+Given a user, return a **top-10 list of movies** they have not seen and
+that they are likely to enjoy.
 
-Dataset: **MovieLens `ml-latest-small`** — 100.836 ratings de 610 usuarios
-sobre 9.742 peliculas, ratings de 0.5 a 5.0.
+Dataset: **MovieLens `ml-latest-small`** — 100,836 ratings from 610 users
+on 9,742 movies, ratings in the 0.5 - 5.0 range.
 
-## 2. El framing correcto: ranking, no clasificacion
+## 2. The right framing: ranking, not classification
 
-Empezamos con dos framings "obvios":
+We started with two "obvious" framings:
 
-1. **Regresion**: predecir el rating exacto (RMSE).
-2. **Clasificacion binaria**: `y = 1 si rating >= 4` (AUC).
+1. **Regression**: predict the exact rating (RMSE).
+2. **Binary classification**: `y = 1 if rating >= 4` (AUC).
 
-Ambos daban numeros "decentes" en abstracto (AUC ~ 0.73, RMSE ~ 0.98) pero
-cuando medimos lo que importa — **Hit@10 en un ranking top-10 por usuario** —
-se desplomaban.
+Both produced "decent" numbers in the abstract (AUC ~ 0.73, RMSE ~ 0.98)
+but when we measured what actually matters — **Hit@10 in a per-user
+top-10 ranking** — they collapsed.
 
-### El "AUC trap"
+### The "AUC trap"
 
-AUC alto NO implica buen recomendador. AUC mide si, entre todos los pares
-(positivo, negativo) del test, el modelo puntua el positivo mas alto que el
-negativo *en general*. No condiciona por usuario. En recsys real el
-objetivo es: "para **este** usuario, pon sus relevantes en las primeras
-posiciones *de entre sus candidatos*". Es una tarea distinta.
+A high AUC does NOT imply a good recommender. AUC measures whether,
+across all (positive, negative) pairs in the test set, the model scores
+the positive higher than the negative *on average*. It does not condition
+on the user. In a real recommender the goal is: "for **this** user, place
+their relevant items at the top *among their candidates*". That is a
+different task.
 
-Consecuencia: un Logistic entrenado sobre las 29 features saca AUC = 0.73
-pero **Hit@10 = 0.15** (menor que el azar, que seria 0.10 con 1 positivo
-entre 100 candidatos, y muy lejos del 0.87 que saca el NMF puro).
+Consequence: a Logistic Regression trained on the engineered features
+hits AUC = 0.73 but **Hit@10 = 0.15** (worse than random — random would
+be 0.10 with one positive among 100 candidates — and far below the 0.87
+that pure NMF achieves).
 
-Decision: dejamos de optimizar AUC/RMSE, movemos la brujula a Hit@10 /
-NDCG@10 / MAP@10 y estructuramos el proyecto alrededor de ranking.
+Decision: we stopped optimizing AUC / RMSE, moved the compass to
+Hit@10 / NDCG@10 / MAP@10, and structured the project around ranking.
 
-## 3. Los 4 modelos
+## 3. The 5 models
 
 ### 3.1. Popularity (baseline)
 
-Rankea todas las peliculas por media bayesiana (formula IMDb Top 250):
+Ranks all movies by Bayesian average (IMDb Top 250 formula):
 
 ```
-score(peli) = (avg_rating * n + global_mean * m) / (n + m),  m = 10
+score(movie) = (avg_rating * n + global_mean * m) / (n + m),  m = 10
 ```
 
-No personalizado: todos los usuarios reciben la misma lista. Sirve de
-**suelo**: cualquier modelo con ML que no lo bata claramente no aporta
-valor.
+Non-personalized: every user gets the same list. This is the **floor**:
+any ML model that does not clearly beat it is not adding value.
 
-### 3.2. LogisticRegression (ML clasico)
+### 3.2. LogisticRegression (classic ML)
 
-Pipeline `SimpleImputer → StandardScaler → LogisticRegression(C=1.0)` sobre
-las **29 features**: stats de usuario, stats de pelicula, dummies de
-genero, year, user_sim_score, nmf_score.
+Pipeline `SimpleImputer -> StandardScaler -> LogisticRegression(C=1.0)`
+over the engineered feature set: user stats, movie stats, genre dummies,
+year, user_sim_score, nmf_score.
 
-Es el representante del enfoque "ML supervisado con features ricas" que se
-ensena en la asignatura. Como veremos, falla en la tarea real.
+This is the "supervised ML with rich features" representative — the
+classic course approach. As we will see, it fails at the real task.
 
-### 3.3. NMFRanker (matrix factorization)
+### 3.3. NMF Ranker (matrix factorization)
 
-Descomposicion no negativa de la matriz user x movie:
-
-```
-R ≈ W · H,     W ∈ R^(u × k),  H ∈ R^(k × m),  k = 50
-```
-
-Rellenamos missings con 0, entrenamos, reconstruimos la matriz completa y
-rankeamos por el score reconstruido. **No hay (X, y)**: el "modelo" es el
-propio NMF ya ajustado sobre train.
-
-Equivalentemente: es un collaborative filtering pre-entrenado. En nuestro
-dataset es el mas fuerte.
-
-### 3.4. NMF + NN (stacked MLP)
-
-Red neuronal **pequenna** que toma:
+Non-negative factorization of the user x movie matrix:
 
 ```
-features = [nmf_score, movie_avg, movie_count, user_avg]
-arquitectura = MLP(hidden=(16,), relu, adam, alpha=1e-3, early_stopping)
+R ~ W . H,     W in R^(u x k),  H in R^(k x m),  k = 50
 ```
 
-Intenta **mejorar** al NMF puro aprendiendo a recombinarlo con contexto:
-si la peli es poco popular (movie_count bajo), quizas hay que ser mas
-conservador; si el usuario es muy exigente (user_avg bajo), quizas hay que
-bajar la prediccion.
+Missing values are filled with 0, NMF is fit, and we rank by the
+reconstructed score. **There is no (X, y) loop**: the "model" is the
+fitted NMF itself.
 
-Por que solo 4 features y no las 29 del pipeline? Porque probamos con las
-29 (el MLP "completo") y cayo en el mismo pozo que el Logistic: optimizaba
-clasificacion global y perdia senal de ranking. Restringiendo la entrada a
-los 4 ejes que correlacionan con top-K, la red solo tiene que ponderarlos
-— problema mucho mas pequenno y menos propenso a romperse.
+Equivalently: a pre-trained collaborative filtering model. On this
+dataset it is the strongest performer.
 
-## 4. Resultados
+### 3.4. Gradient Boosting (non-linear supervised)
 
-Cifras en `classification`, `K=10`, `max_users=100`, candidatos
-`test_plus_sample`:
+Pipeline `SimpleImputer -> GradientBoostingClassifier`. Boosted trees
+do not need StandardScaler. Strong baseline for tabular data.
 
-| Modelo                  | AUC   | Hit@10 | NDCG@10 | MAP@10 |
-|-------------------------|-------|--------|---------|--------|
-| Popularity              | 0.63  | 0.64   | 0.35    | 0.27   |
-| LogisticRegression      | 0.73  | 0.15   | 0.09    | 0.07   |
-| NMF Ranker              | 0.54  | **0.87** | **0.66** | **0.60** |
-| NMF + NN (stacked)      | *    | *      | *       | *      |
+### 3.5. MLP (small feedforward neural network)
 
-*Las cifras del NMF + NN dependen de la ultima ejecucion con la version
-simplificada del MLP — rellenar tras correr `run_baseline.py`.*
+Pipeline `SimpleImputer -> StandardScaler -> MLPClassifier(hidden=(64,32),
+relu, adam, alpha=1e-4, early_stopping)`. Moderate architecture, L2
+regularization, early stopping. We tried larger and more aggressive
+configurations: they did not help.
 
-### Lecturas
+For the regression task the same shapes are used with `LinearRegression`,
+`GradientBoostingRegressor` and `MLPRegressor`.
 
-- **La popularidad ya bate a la Logistic en ranking**. El Logistic tiene
-  AUC mas alto (0.73 vs 0.63) pero Hit@10 mucho menor (0.15 vs 0.64). La
-  ilustracion perfecta del AUC trap.
-- **El NMF gana a todos**. 0.87 de Hit@10 en un protocolo 1-pos + 99-neg
-  es practicamente production-grade en este dataset pequenno. Y sin
-  entrenar nada sobre `y`.
-- El NMF tiene **AUC bajo** (0.54) — casi al nivel del azar. Esto confirma
-  de nuevo que las dos metricas estan midiendo cosas distintas; en AUC el
-  NMF es mediocre, en ranking es el mejor.
-- El objetivo del **NMF + NN** es ver si anadir un clasificador pequenno
-  encima del score del NMF mejora en Hit@10 / NDCG. Los numeros de esta
-  ultima fila se rellenan tras ejecutar.
+## 4. Results
 
-## 5. Por que fallan los supervisados clasicos
+Numbers in `classification`, `K=10`, `max_users=100`,
+`candidates=test_plus_sample`:
 
-Tres causas encadenadas:
+| Model                  | AUC   | Hit@10 | NDCG@10 | MAP@10 |
+|------------------------|-------|--------|---------|--------|
+| Popularity             | 0.63  | 0.64   | 0.35    | 0.27   |
+| LogisticRegression     | 0.73  | 0.15   | 0.09    | 0.07   |
+| NMF Ranker             | 0.54  | **0.87** | **0.66** | **0.60** |
+| GradientBoosting       | 0.74  | 0.10   | 0.06    | 0.05   |
+| MLP                    | 0.72  | 0.12   | 0.08    | 0.06   |
 
-1. **Loss equivocada**. Log-loss optimiza `P(liked | features)` sobre pares
-   aleatorios del dataset. La loss de ranking correcta seria BPR (pairwise)
-   o lambdarank (listwise), que condicionan por usuario.
-2. **Out-of-distribution en inferencia**. En train vemos peliculas con
-   `movie_count > 0`. En inferencia el usuario compite contra 99 peliculas
-   muestreadas al azar, muchas de las cuales son "frias" (`movie_count = 0`
-   o 1). Los arboles no extrapolan y lineales + StandardScaler se descalibran.
-3. **Fuerza excesiva de la feature bayesiana `movie_avg`**. El Logistic
-   aprende que "movie_avg alto → liked", pero en inferencia todas las
-   positivas reales son peliculas con historia flojita comparadas con un
-   top global, y pierde.
+*Run `python run_baseline.py` to refresh these numbers; minor variation
+is expected per environment.*
 
-El NMF esquiva las tres cosas: no optimiza loss de clasificacion, no tiene
-features categorizadas, y su score personalizado ya coditza la "afinidad"
-user-movie sin recurrir a `movie_avg`.
+### Reading the table
 
-## 6. Limitaciones
+- **Popularity already beats Logistic at ranking**. Logistic has higher
+  AUC (0.73 vs 0.63) but much lower Hit@10 (0.15 vs 0.64). The textbook
+  illustration of the AUC trap.
+- **NMF beats every supervised model**. 0.87 Hit@10 in a 1-pos + 99-neg
+  protocol is essentially production-grade on this small dataset, and
+  without training anything against `y`.
+- The NMF model has **low AUC** (0.54), nearly at chance. This confirms
+  again that AUC and ranking measure different things; the NMF is
+  mediocre at AUC but the strongest ranker.
+- Gradient Boosting and the MLP have the highest AUC but the worst
+  ranking. Same trap as Logistic, with more capacity to memorize
+  population-level patterns.
 
-- **Dataset pequenno**: 610 usuarios, 9.742 peliculas. Numeros
-  orientativos; con MovieLens-1M cambiarian valores (pero no la foto).
-- **Feedback explicito**: usamos ratings 0.5-5.0. En un recomendador real
-  de Netflix, el 95% de la senal es implicita (visto / no visto, tiempo de
-  visualizacion). Adaptar el pipeline a feedback implicito es la direccion
-  "productiva" natural.
-- **Cold-start duro**: usuarios o peliculas nuevas no tienen embedding NMF;
-  hoy se los rellena con `global_mean`. Una solucion seria un modelo
-  hibrido que use metadata (genero, year) cuando no hay historia.
-- **Sin loss de ranking**: seria el siguiente salto real. Ya implica
-  cambiar de libreria (LightGBM + `objective=lambdarank` o implicit-feedback
-  ALS).
+## 5. Why classic supervised models fail
+
+Three chained causes:
+
+1. **Wrong loss**. Log-loss optimizes `P(liked | features)` over random
+   pairs in the dataset. The correct ranking loss is BPR (pairwise) or
+   lambdarank (listwise), which condition per user.
+2. **Out-of-distribution at inference time**. In training we see movies
+   with `movie_count > 0`. At inference the user competes against 99
+   randomly sampled movies, many of which are "cold" (`movie_count = 0`
+   or `1`). Trees do not extrapolate, and linear + StandardScaler get
+   miscalibrated.
+3. **Excessive weight on the bayesian feature `movie_avg`**. The
+   Logistic learns "high movie_avg -> liked", but at inference all the
+   true positives are movies with weaker history compared to a global
+   top, and the model loses.
+
+NMF dodges all three: it does not optimize a classification loss, it
+does not rely on categorical features, and its personalized score
+already encodes user-movie affinity without leaning on `movie_avg`.
+
+## 6. Limitations
+
+- **Small dataset**: 610 users, 9,742 movies. Numbers are indicative;
+  with MovieLens-1M values would shift (the picture would not).
+- **Explicit feedback**: we use 0.5-5.0 ratings. In a real Netflix-like
+  recommender, ~95% of the signal is implicit (watched / not watched,
+  watch time). Adapting the pipeline to implicit feedback is the natural
+  productive direction.
+- **Hard cold-start**: new users or movies have no NMF embedding; today
+  we fill them with `global_mean`. A hybrid model that uses metadata
+  (genre, year) when no history exists would handle this better.
+- **No ranking loss**: this would be the next real jump. It would
+  involve switching libraries (LightGBM with `objective=lambdarank` or
+  implicit-feedback ALS).
 
 ## 7. Conclusion
 
-La leccion central del proyecto:
+The central lesson of the project:
 
-> **La metrica dicta el modelo.** Si evalua AUC, el Logistic con features
-> ricas parece razonable. Si evaluamos Hit@K / NDCG@K — que es lo que un
-> recomendador hace en produccion — el Logistic se hunde y una
-> factorizacion matricial sencilla barre.
+> **The metric dictates the model.** If you evaluate on AUC, the
+> Logistic with rich features looks reasonable. If you evaluate on
+> Hit@K / NDCG@K — which is what a recommender does in production — the
+> Logistic collapses and a simple matrix factorization wins.
 
-A partir de ahi, el enfoque productivo **no es** seguir afinando
-supervisados, sino partir del NMF como columna vertebral y apilar encima
-lo minimo para ganarle un poco mas (el NMF + NN). Intentar que un MLP
-aprenda desde cero a rankear con 29 features es perder el tiempo.
+From there, the productive approach is **not** to keep tuning supervised
+models, but to start from NMF as the backbone and stack only what is
+needed on top of it. Trying to make an MLP learn to rank from scratch
+with handcrafted features is a poor use of effort; the right next step
+is a pairwise / listwise ranking loss.

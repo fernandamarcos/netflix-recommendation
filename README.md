@@ -1,107 +1,140 @@
 # Netflix / MovieLens recommender
 
-Sistema de recomendacion sobre **MovieLens `ml-latest-small`** (100.836
-ratings, 9.742 peliculas, 610 usuarios). Proyecto de *Business with Data*.
+Recommendation system built on **MovieLens `ml-latest-small`** (100,836
+ratings, 9,742 movies, 610 users). Final project for *Business with Data*.
 
-El objetivo NO es predecir el rating exacto (regresion), sino construir un
-buen **top-10 por usuario**. La metrica principal es **Hit@10 / NDCG@10 /
-MAP@10**, no RMSE ni AUC.
+The goal is NOT to predict the exact rating (regression), but to build a
+good **top-10 list per user**. The headline metrics are
+**Hit@10 / NDCG@10 / MAP@10**, not RMSE or AUC.
 
 ---
 
-## Estructura
+## Repo layout
 
 ```
 netflix-recommendation/
-├── ml-latest-small/        dataset (ratings.csv, movies.csv)
-├── data_loader.py          carga + features + split leave-last-out
-├── baselines.py            PopularityBaseline (sin personalizar)
-├── models.py                NMFRanker, NMFStackedMLP, Logistic / Linear
-├── evaluation.py           metricas de ranking (P@K, R@K, NDCG@K, Hit@K, MAP@K)
-├── run_baseline.py         pipeline end-to-end (carga → entrena → evalua → tabla)
+├── ml-latest-small/         dataset (ratings.csv, movies.csv)
+├── data_loader.py           load + features + leave-last-out split
+├── baselines.py             PopularityBaseline (non-personalized)
+├── models.py                NMF Ranker, Logistic / Linear, GBM, MLP
+├── evaluation.py            ranking metrics (P@K, R@K, NDCG@K, Hit@K, MAP@K)
+├── run_baseline.py          end-to-end pipeline (load -> train -> evaluate -> table)
+├── tune_classification.py   randomized hyperparameter search (classification)
+├── tune_regression.py       randomized hyperparameter search (regression)
+├── show_importances.py      Gradient Boosting feature importance
+├── eda_preprocessing.py     EDA + preprocessing report (figures saved to ./figures)
 ├── requirements.txt
 ├── README.md
-├── report.md               informe con hallazgos, "AUC trap" y comparativa
-└── legacy/                 codigo v1 y scripts EDA
+├── report.md                findings, "AUC trap" and model comparison
+├── figures/                 PNG charts produced by eda_preprocessing.py
+└── legacy/                  v1 code and original EDA scripts
 ```
 
 ---
 
-## Los 4 modelos
+## The 5 models
 
-| # | Modelo              | Tipo                        | Por que esta ahi                    |
-|---|---------------------|-----------------------------|--------------------------------------|
-| 1 | **Popularity**      | Baseline no personalizado    | Suelo. Todo modelo "con ML" DEBE batirlo. |
-| 2 | **LogisticRegression** | Lineal supervisado        | ML clasico con 29 features. Representa el enfoque tradicional "AUC maximizer". |
-| 3 | **NMF Ranker**      | Factorizacion matricial     | Nuestro ganador. Lee el score reconstruido por NMF y rankea por el. |
-| 4 | **NMF + NN**        | Red neuronal pequenna stacked | Toma `nmf_score` + 3 features de contexto y aprende a combinarlos. |
+| # | Model                | Type                              | Why it's here |
+|---|----------------------|-----------------------------------|---------------|
+| 1 | **Popularity**       | Non-personalized baseline         | Floor. Any "ML" model MUST beat this. |
+| 2 | **NMF Ranker**       | Matrix factorization              | Reads the score reconstructed by NMF and ranks by it. |
+| 3 | **LogisticRegression** (classification) / **LinearRegression** (regression) | Linear supervised | Classic ML baseline over the engineered features. |
+| 4 | **GradientBoosting** | Boosted trees                     | Strong non-linear baseline. |
+| 5 | **MLP**              | Small feedforward neural network  | One non-linear deep-learning model in the lineup. |
 
-La MLP stacked es intencionalmente diminuta: 1 capa oculta de 16 neuronas, 4
-features (`nmf_score`, `movie_avg`, `movie_count`, `user_avg`). Con esto
-evitamos el error que cometimos antes de darle las 29 features: el modelo
-grande caia en el "AUC trap" y desaprendia a rankear. Aqui restringimos la
-senal y la red solo tiene que reponderar lo que el NMF ya hace bien.
+The MLP is intentionally moderate (hidden 64 -> 32) with StandardScaler,
+early stopping and L2. Larger architectures or more dropout did not help
+on this dataset.
 
 ---
 
-## Pipeline de datos
+## Data pipeline
 
-1. **Carga** `ratings.csv` + `movies.csv`.
-2. **Movie features**: dummies de genero, `year` extraido del titulo.
-3. **Split leave-last-out**: el rating mas reciente de cada usuario va a
-   test. Evita fuga temporal.
-4. **Stats solo con train**: `user_avg`, `user_count`, `movie_avg`,
+1. Load `ratings.csv` + `movies.csv`.
+2. **Movie features**: genre dummies, `year` extracted from the title.
+3. **Leave-last-out split**: each user's most recent rating goes to test.
+   Avoids temporal leakage.
+4. **Train-only stats**: `user_avg`, `user_count`, `movie_avg`,
    `movie_count`, `global_mean`.
-5. **User-user similarity vectorizado** sobre la matriz user x movie.
-6. **NMF latent factors** (k=50) sobre `user_movie.fillna(0)`.
-7. **Cold-start**: missing → `global_mean` / `0`.
+5. **Vectorized user-user similarity** over the user x movie matrix.
+6. **NMF latent factors** (k=50) over `user_movie.fillna(0)`.
+7. **Cold start**: missing -> `global_mean` / `0`.
 8. **Target**:
    - `classification`: `y = (rating >= 4).astype(int)`.
    - `regression`: `y = rating` (0.5 - 5.0).
 
-Los lookups de `user_sim_score` y `nmf_score` se guardan **completos** (todas
-las parejas user-movie con score calculable). Esto es clave: sin ellos, al
-scorear peliculas no vistas las features colapsarian a una constante y el
-ranking dejaria de tener sentido.
+The `user_sim_score` and `nmf_score` lookups are stored **complete**
+(every user-movie pair with a computable score). This is critical: without
+them, when scoring unseen movies the features would collapse to a constant
+and the ranking would lose meaning.
 
 ---
 
-## Evaluacion
+## Evaluation
 
-Metricas de ranking calculadas por usuario y promediadas:
+Ranking metrics computed per user and averaged:
 
-- **Hit@10** — 1 si alguna peli relevante (test) aparece en el top-10.
-- **NDCG@10** — DCG/IDCG con relevancia graduada (usa el rating real).
-- **MAP@10** — average-precision medio.
+- **Hit@10** — 1 if any relevant movie (in test) appears in the top-10.
+- **NDCG@10** — DCG / IDCG with graded relevance (uses the actual rating).
+- **MAP@10** — mean average precision.
 - **Precision@10 / Recall@10**.
 
-`evaluate_ranker(model, data, k=10, candidate_strategy=...)` soporta:
+`evaluate_ranker(model, data, k=10, candidate_strategy=...)` supports:
 
-- `test_plus_sample` (default): 1 positivo + 99 negativas aleatorias.
-  Protocolo estandar leave-one-out en papers de recsys.
-- `unseen`: rankea TODAS las peliculas no vistas por el usuario.
+- `test_plus_sample` (default): 1 positive + 99 random negatives.
+  Standard leave-one-out protocol used in recsys papers.
+- `unseen`: ranks ALL movies the user has not seen.
 
 ---
 
-## Uso
+## EDA / Preprocessing report
+
+`eda_preprocessing.py` produces an end-to-end EDA report with 11 PNG
+figures saved to `./figures/`:
+
+- nulls and duplicates
+- rating distribution
+- class balance for classification
+- ratings per user and per movie (long tail)
+- genre distribution (catalog vs consumption)
+- temporal distribution (movie year and rating year)
+- sparsity of the user x movie matrix
+- correlation heatmap of engineered features
+- correlation of each feature with the target
+
+```bash
+python eda_preprocessing.py
+python eda_preprocessing.py --skip-load-data   # skip the ~30s NMF section
+```
+
+---
+
+## Usage
 
 ```bash
 pip install -r requirements.txt
 
-# Pipeline completo: 4 modelos, tabla final
+# Full pipeline: 5 models, summary table
 python run_baseline.py
 
-# Regresion (rating 0.5-5.0)
+# Regression task (rating 0.5 - 5.0)
 python run_baseline.py --task regression
 
-# Mas usuarios, top-20, candidatos = todas las no vistas
+# More users, top-20, candidates = all unseen movies
 python run_baseline.py --k 20 --max-users 200 --candidates unseen
 
-# Solo un subconjunto
-python run_baseline.py --only "Popularity,NMF Ranker,NMF + NN"
+# Run a subset
+python run_baseline.py --only "Popularity,NMF Ranker"
+
+# Hyperparameter search
+python tune_classification.py
+python tune_regression.py
+
+# Feature importance from the tuned GBM
+python show_importances.py
 ```
 
-Uso programatico:
+Programmatic usage:
 
 ```python
 from data_loader import load_data, build_candidate_features
@@ -111,27 +144,27 @@ from evaluation import evaluate_ranker
 data = load_data(task="classification")
 models = build_models("classification")
 
-nn = models["NMF + NN"]
-nn.fit(data.X_train, data.y_train)
+nmf = models["NMF Ranker"]
+nmf.fit(data.X_train, data.y_train)
 
-metrics = evaluate_ranker(nn, data, k=10, max_users=100)
+metrics = evaluate_ranker(nmf, data, k=10, max_users=100)
 print(metrics)  # {'hit@10': ..., 'ndcg@10': ..., ...}
 ```
 
 ---
 
-## Reproducibilidad
+## Reproducibility
 
-Semillas fijadas a 42: NMF, MLP, muestreo negativo. El split leave-last-out
-es deterministico (ordena por timestamp).
+Random seeds fixed to 42: NMF, MLP, negative sampling. The leave-last-out
+split is deterministic (sorted by timestamp).
 
 ---
 
-## Hallazgos
+## Findings
 
-Ver `report.md`. Resumen:
+See `report.md`. Summary:
 
-> En top-K, **NMF puro** bate con diferencia al supervisado clasico
-> (Logistic). Un NN pequenno sobre `nmf_score` intenta mejorarlo y cierra
-> la historia. La leccion es el **AUC trap**: optimizar probabilidad
-> global es otra tarea distinta a rankear.
+> At top-K, **pure NMF** beats the classic supervised models (Logistic,
+> GBM, MLP) by a wide margin. The lesson is the **AUC trap**: optimizing
+> a global classification probability is a different task from ranking
+> per user.
