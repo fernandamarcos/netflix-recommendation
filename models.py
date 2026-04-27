@@ -41,7 +41,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.neural_network import MLPClassifier, MLPRegressor
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
 from baselines import PopularityBaseline
 
@@ -49,30 +49,43 @@ from baselines import PopularityBaseline
 # =========================
 # Pure NMF as a ranker
 # =========================
+# =========================
+# Pure NMF as a ranker
+# =========================
 class NMFRanker:
     """
-    Ranks directly by the score reconstructed by NMF (the 'nmf_score' column
-    of the feature set produced by data_loader). It does NOT train anything
-    on its own — it just reads a precomputed feature.
+    Uses the precomputed NMF reconstructed score.
 
-    Useful to see how much signal NMF carries on its own.
+    For regression, it calibrates nmf_score to the rating scale using a
+    LinearRegression fitted only on the training set.
+
+    For classification/ranking, it still uses the calibrated score to rank
+    movies and convert scores into probability-like values.
     """
     def __init__(self, task: str = "classification"):
         self.task = task
+        self.calibrator = LinearRegression()
 
     def fit(self, X, y):
+        # Learn mapping from raw nmf_score to real rating using train only
+        self.calibrator.fit(X[["nmf_score"]], y)
         return self
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return X["nmf_score"].values.astype(float)
+        # Predict calibrated rating-like scores
+        scores = self.calibrator.predict(X[["nmf_score"]])
+
+        # Keep predictions in valid rating range
+        scores = np.clip(scores, 0.0, 5.0)
+
+        return scores
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
-        # Map score (approx range 0.5-5.0) into a probability in [0, 1]
+        # Convert calibrated score [0, 5] into probability-like value [0, 1]
         scores = self.predict(X)
-        p = np.clip((scores - 0.5) / 4.5, 0.0, 1.0)
+        p = np.clip(scores / 5.0, 0.0, 1.0)
+
         return np.column_stack([1.0 - p, p])
-
-
 # =========================
 # sklearn factories
 # =========================
