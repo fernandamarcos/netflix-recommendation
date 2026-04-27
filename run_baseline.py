@@ -2,16 +2,16 @@
 run_baseline.py
 ===============
 
-Pipeline completo: carga, entrenamiento y evaluacion de TODOS los modelos
-definidos en models.build_models(). Compara metrica clasica (AUC o RMSE)
-vs metricas de ranking (P@K, R@K, NDCG@K, Hit@K, MAP@K).
+End-to-end pipeline: loads data, trains and evaluates ALL models defined in
+models.build_models(). Compares the classic metric (AUC or RMSE) against
+ranking metrics (P@K, R@K, NDCG@K, Hit@K, MAP@K).
 
-Uso:
+Usage:
     python run_baseline.py
     python run_baseline.py --task regression
     python run_baseline.py --k 20 --max-users 200
     python run_baseline.py --candidates unseen --max-users 50
-    python run_baseline.py --only "Popularity,NMF Ranker"  (filtra por nombre)
+    python run_baseline.py --only "Popularity,NMF Ranker"  (filter by name)
 """
 
 import argparse
@@ -48,41 +48,41 @@ def main():
     parser.add_argument("--task", choices=["classification", "regression"], default="classification")
     parser.add_argument("--k", type=int, default=10)
     parser.add_argument("--max-users", type=int, default=100,
-                        help="Nº de usuarios para ranking. -1 para todos.")
+                        help="Number of users for ranking. Use -1 for all.")
     parser.add_argument("--candidates", choices=["unseen", "test_plus_sample"],
                         default="test_plus_sample")
     parser.add_argument("--only", type=str, default=None,
-                        help="Lista separada por comas de nombres de modelos a correr. "
-                             "Ej: 'Popularity,NMF Ranker'")
+                        help="Comma-separated list of model names to run. "
+                             "Example: 'Popularity,NMF Ranker'")
     args = parser.parse_args()
     max_users = None if args.max_users is not None and args.max_users < 0 else args.max_users
 
-    # 1. Carga
+    # 1. Load
     t0 = time.time()
-    print(f"Cargando datos (task={args.task})...")
+    print(f"Loading data (task={args.task})...")
     data = load_data(task=args.task)
-    print(f"  done en {time.time() - t0:.1f}s. "
+    print(f"  done in {time.time() - t0:.1f}s. "
           f"X_train={data.X_train.shape}, X_test={data.X_test.shape}, "
           f"features={len(data.feature_columns)}")
 
-    # 2. Modelos
+    # 2. Models
     models = build_models(args.task)
     if args.only:
         wanted = {n.strip() for n in args.only.split(",")}
         models = {k: v for k, v in models.items() if k in wanted}
-        print(f"  Modelos filtrados: {list(models.keys())}")
+        print(f"  Filtered models: {list(models.keys())}")
 
-    # 3. Entrenamiento
-    print(f"\nEntrenando modelos...")
+    # 3. Training
+    print(f"\nTraining models...")
     trained = {}
     for name, model in models.items():
         t0 = time.time()
         model.fit(data.X_train, data.y_train)
         trained[name] = model
-        print(f"  {name:22s}  entrenado en {time.time() - t0:.1f}s")
+        print(f"  {name:22s}  trained in {time.time() - t0:.1f}s")
 
-    # 4. Metricas legacy
-    print(f"\n=== Metrica legacy ({args.task}) ===")
+    # 4. Legacy metrics
+    print(f"\n=== Legacy metric ({args.task}) ===")
     legacy = {}
     for name, model in trained.items():
         legacy[name] = evaluate_legacy(name, args.task, model, data)
@@ -104,8 +104,8 @@ def main():
         results[name] = metrics
         pretty_print_metrics(name, metrics)
 
-    # 6. Resumen compacto
-    print(f"\n=== Resumen ranking top-{args.k} ===")
+    # 6. Compact summary
+    print(f"\n=== Ranking summary top-{args.k} ===")
     header = f"{'Model':22s}  {'P@K':>7s}  {'R@K':>7s}  {'NDCG':>7s}  {'Hit':>7s}  {'MAP':>7s}"
     print(header)
     print("-" * len(header))

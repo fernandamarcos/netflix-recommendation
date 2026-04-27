@@ -2,19 +2,19 @@
 baselines.py
 ============
 
-Baseline sin personalizacion: recomienda lo mas popular a todo el mundo.
+Non-personalized baseline: recommends the most popular items to everyone.
 
-En un sistema de recomendacion SIEMPRE hay que comparar contra este baseline.
-Si tu modelo "con ML" no bate claramente a la popularidad ponderada, no
-sirve: el usuario estaria igual de contento viendo "las peliculas mas votadas
-de la web".
+In a recommender system you ALWAYS need to compare against this baseline. If
+your "ML" model does not clearly beat weighted popularity, it is not adding
+value: the user would be just as happy looking at "the most rated movies on
+the site".
 
-Formula (bayesian_avg, estilo IMDb Top 250):
+Formula (bayesian_avg, IMDb Top 250 style):
 
-    score(peli) = (avg_rating * n_ratings + global_mean * m) / (n_ratings + m)
+    score(movie) = (avg_rating * n_ratings + global_mean * m) / (n_ratings + m)
 
-donde `m` es un parametro de suavizado. Evita que una peli con 2 ratings de
-5 estrellas se pase a la cima por encima de una peli con 200 ratings de 4.5.
+where `m` is a smoothing parameter. Prevents a movie with two 5-star ratings
+from jumping above a movie with 200 ratings of 4.5.
 """
 
 from __future__ import annotations
@@ -25,14 +25,14 @@ import pandas as pd
 
 class PopularityBaseline:
     """
-    Rankea peliculas por popularidad ponderada. No personalizado: a todos los
-    usuarios les recomienda las mismas peliculas.
+    Ranks movies by weighted popularity. Non-personalized: every user receives
+    the same ranking.
 
     strategy:
-        - 'count'         : score = movie_count (la mas vista primero).
+        - 'count'         : score = movie_count (most rated first).
         - 'bayesian_avg'  : score = (avg * n + global_mean * m) / (n + m).
-                            Suaviza pelis con pocos ratings hacia la media
-                            global. Es la formula de IMDb Top 250, util para
+                            Smooths movies with few ratings towards the global
+                            mean. Same formula as IMDb Top 250, useful for
                             cold start.
     """
     def __init__(self, task: str = "classification",
@@ -43,9 +43,8 @@ class PopularityBaseline:
         self.global_mean_ = 3.5
 
     def fit(self, X: pd.DataFrame, y: pd.Series):
-        # En classification guardamos el liked-rate re-escalado a [0, 5] para que
-        # cuadre con la escala de `movie_avg`. En regression usamos la media
-        # cruda.
+        # In classification we store the liked-rate rescaled to [0, 5] so it
+        # matches the scale of `movie_avg`. In regression we use the raw mean.
         if self.task == "regression":
             self.global_mean_ = float(np.mean(y))
         else:
@@ -66,7 +65,7 @@ class PopularityBaseline:
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         scores = self._score(X)
-        # Min-max a [0, 1] para exponer predict_proba-like
+        # Min-max to [0, 1] so we expose a predict_proba-like interface
         lo, hi = scores.min(), scores.max()
         p = (scores - lo) / (hi - lo + 1e-9)
         return np.column_stack([1.0 - p, p])

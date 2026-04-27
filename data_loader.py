@@ -2,29 +2,29 @@
 data_loader.py
 ==============
 
-Carga y preprocesa el dataset MovieLens (ml-latest-small) de forma consistente
-para tareas de clasificacion ('liked' = rating >= 4) y de regresion (rating 0-5).
+Loads and preprocesses the MovieLens (ml-latest-small) dataset consistently for
+classification ('liked' = rating >= 4) and regression (rating 0-5) tasks.
 
-Uso basico:
+Basic usage:
     from data_loader import load_data
 
-    data = load_data(task="classification")   # o "regression"
+    data = load_data(task="classification")   # or "regression"
 
     data.X_train, data.X_test, data.y_train, data.y_test
-    data.train_ratings, data.test_ratings     # raw DataFrames con user_id, movie_id, rating, timestamp
-    data.movies                               # DataFrame de peliculas con generos
-    data.feature_columns                      # lista de columnas de X_*
-    data.genre_columns                        # subset de feature_columns que son generos
+    data.train_ratings, data.test_ratings     # raw DataFrames with user_id, movie_id, rating, timestamp
+    data.movies                               # movie catalog with genre dummies
+    data.feature_columns                      # list of columns in X_*
+    data.genre_columns                        # subset of feature_columns that are genres
 
-Puntos clave de diseno:
-    * Split leave-last-out por usuario (el rating mas reciente de cada usuario va a test).
-      Evita fuga temporal que tiene el train_test_split aleatorio.
-    * Todas las estadisticas agregadas (user_avg, movie_avg, global_mean) se calculan
-      SOLO con train, nunca con test.
-    * user_sim_score vectorizado (matriz de similitud @ matriz de ratings). Mucho mas
-      rapido que aplicar fila a fila.
-    * Feature 'year' extraida del titulo.
-    * Configurable: threshold de 'liked', k de vecinos, tarea, etc.
+Design choices:
+    * Leave-last-out split per user (each user's most recent rating goes to test).
+      Avoids the temporal leakage you'd get from a random train_test_split.
+    * All aggregate stats (user_avg, movie_avg, global_mean) are computed
+      using train ONLY, never test.
+    * user_sim_score is vectorized (similarity matrix @ rating matrix).
+      Much faster than applying row by row.
+    * 'year' feature extracted from the title.
+    * Configurable: 'liked' threshold, neighbor k, task, etc.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ import pandas as pd
 
 try:
     from sklearn.metrics.pairwise import cosine_similarity
-except ImportError:  # fallback sin dependencia externa
+except ImportError:  # fallback without external dependency
     def cosine_similarity(X):
         X = np.asarray(X, dtype=float)
         norms = np.linalg.norm(X, axis=1, keepdims=True)
@@ -54,7 +54,7 @@ except ImportError:
 
 
 # =========================
-# Tipos / constantes
+# Types / constants
 # =========================
 Task = Literal["classification", "regression"]
 
@@ -66,42 +66,42 @@ NMF_N_COMPONENTS_DEFAULT = 50
 
 @dataclass
 class RecommenderData:
-    """Contenedor de todo lo necesario para entrenar y evaluar."""
+    """Container with everything needed to train and evaluate."""
     task: Task
 
-    # Matrices finales listas para sklearn
+    # Final matrices ready for sklearn
     X_train: pd.DataFrame
     X_test: pd.DataFrame
     y_train: pd.Series
     y_test: pd.Series
 
-    # Raw DataFrames con user_id, movie_id, rating, timestamp (y columnas derivadas).
-    # Utiles para calcular metricas de ranking por usuario.
+    # Raw DataFrames with user_id, movie_id, rating, timestamp (and derived columns).
+    # Useful when computing per-user ranking metrics.
     train_ratings: pd.DataFrame
     test_ratings: pd.DataFrame
 
-    # Catalogo de peliculas con dummies de generos y year
+    # Movie catalog with genre dummies and 'year'
     movies: pd.DataFrame
 
     feature_columns: List[str]
     genre_columns: List[str]
 
-    # Objetos intermedios utiles para hacer recomendaciones nuevas (unseen items)
+    # Intermediate objects useful for scoring unseen items
     user_stats: pd.DataFrame = field(repr=False)
     movie_stats: pd.DataFrame = field(repr=False)
     global_mean: float = 0.0
-    # Long-format lookup (user_id, movie_id -> user_sim_score) con TODAS las
-    # parejas calculables (incluidas peliculas no vistas por el usuario),
-    # necesario para rankear candidatos correctamente.
+    # Long-format lookup (user_id, movie_id -> user_sim_score) covering ALL
+    # user-movie pairs with a computable score (including movies the user
+    # has not seen). Required to rank unseen candidates correctly.
     user_sim_lookup: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
-    # Long-format lookup del score reconstruido por NMF
-    # (user_id, movie_id -> nmf_score). Captura gustos latentes por usuario
-    # mas alla de la popularidad media de la pelicula.
+    # Long-format lookup of the rating reconstructed by NMF
+    # (user_id, movie_id -> nmf_score). Captures latent user taste
+    # beyond a movie's average popularity.
     nmf_lookup: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
 
 # =========================
-# Carga y preprocesado basico
+# Raw load and basic preprocessing
 # =========================
 def _load_raw(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     ratings = pd.read_csv(os.path.join(data_dir, "ratings.csv"))
@@ -114,7 +114,7 @@ def _load_raw(data_dir: str) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def _extract_year(title: str) -> Optional[int]:
-    """MovieLens pone el anio entre parentesis al final del titulo: 'Toy Story (1995)'."""
+    """MovieLens places the year in parentheses at the end of the title: 'Toy Story (1995)'."""
     if not isinstance(title, str):
         return None
     match = re.search(r"\((\d{4})\)\s*$", title.strip())
@@ -122,7 +122,7 @@ def _extract_year(title: str) -> Optional[int]:
 
 
 def _build_movies_with_features(movies: pd.DataFrame) -> tuple[pd.DataFrame, List[str]]:
-    """Anade dummies de genero y year a movies. Devuelve (movies_con_features, lista_columnas_genero)."""
+    """Adds genre dummies and 'year' to movies. Returns (movies_with_features, list_of_genre_columns)."""
     m = movies.copy()
     m["genres"] = m["genres"].fillna("")
 
@@ -133,29 +133,29 @@ def _build_movies_with_features(movies: pd.DataFrame) -> tuple[pd.DataFrame, Lis
 
     m = pd.concat([m, genre_dummies], axis=1)
     m["year"] = m["title"].apply(_extract_year)
-    # Imputamos year con la mediana por si alguna peli no la trae
+    # Impute missing year with the median in case the title has no year tag
     m["year"] = m["year"].fillna(m["year"].median())
 
     return m, list(genre_dummies.columns)
 
 
 # =========================
-# Split leave-last-out por usuario
+# Leave-last-out split per user
 # =========================
 def _leave_last_out_split(
     ratings: pd.DataFrame,
     min_ratings_per_user: int = 2,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Para cada usuario, envia su rating MAS RECIENTE a test y el resto a train.
-    Estandar en evaluacion de recomendadores, evita fuga temporal.
+    For each user, the MOST RECENT rating goes to test and the rest to train.
+    Standard recommender evaluation, avoids temporal leakage.
     """
-    # Excluir usuarios con menos ratings de los necesarios
+    # Drop users that don't have enough ratings
     counts = ratings.groupby("user_id").size()
     valid_users = counts[counts >= min_ratings_per_user].index
     ratings = ratings[ratings["user_id"].isin(valid_users)].copy()
 
-    # Ordenamos por timestamp y marcamos el ultimo por usuario
+    # Sort by timestamp and pick the last per user
     ratings = ratings.sort_values(["user_id", "timestamp"])
     last_per_user = ratings.groupby("user_id").tail(1).index
 
@@ -166,7 +166,7 @@ def _leave_last_out_split(
 
 
 # =========================
-# Estadisticas de train
+# Train-only statistics
 # =========================
 def _fit_train_stats(train: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, float]:
     global_mean = float(train["rating"].mean())
@@ -185,29 +185,29 @@ def _fit_train_stats(train: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, f
 
 
 # =========================
-# User-user similarity (vectorizado)
+# User-user similarity (vectorized)
 # =========================
 def _build_user_sim_scores(
     train: pd.DataFrame,
     top_k: int,
 ) -> pd.DataFrame:
     """
-    Calcula user_sim_score para CADA par (user_id, movie_id) observado en el
-    conjunto de entrenamiento y lo devuelve como DataFrame indexado por
+    Computes user_sim_score for EACH (user_id, movie_id) pair observed in
+    training and returns it as a long-format DataFrame
     (user_id, movie_id) -> score.
 
-    Este mapa se usa luego como lookup al construir features. Para pares no
-    vistos (cold start) devolvemos NaN y se rellena con global_mean.
+    This map is then used as a lookup when building features. Pairs without
+    a computable score (cold start) get NaN and are filled with global_mean.
 
     Idea:
-        Sim_matrix (U x U), Rating_matrix (U x M). Queremos, para cada user u y
-        pelicula m, la media ponderada de los ratings de los top_k usuarios mas
-        parecidos a u que hayan visto m.
+        Sim_matrix (U x U), Rating_matrix (U x M). For each user u and movie m,
+        we want the similarity-weighted average of ratings from u's top_k most
+        similar users who have rated m.
 
-        Simplificacion: en vez de usar solo top_k, usamos TODOS los vecinos pero
-        ponderados por similitud y mascara 'ha visto la peli'. Esto es mucho mas
-        rapido y suele aproximar bien el score top-k (los vecinos mas similares
-        dominan el sumatorio).
+        Simplification: instead of strictly using only top_k, we use ALL
+        neighbors weighted by similarity and a "has-rated" mask. This is
+        much faster and approximates the strict top-k score well (the most
+        similar neighbors dominate the sum).
     """
     user_movie = train.pivot_table(
         index="user_id",
@@ -216,31 +216,31 @@ def _build_user_sim_scores(
         aggfunc="mean",
     )
 
-    # Matriz de ratings (0 donde no hay rating) y mascara (1 donde si hay)
+    # Rating matrix (0 where no rating) and mask (1 where rating exists)
     R = user_movie.fillna(0.0).values
     M = (~user_movie.isna()).astype(float).values
 
-    # Similitud usuario-usuario sobre ratings crudos
+    # User-user similarity over raw ratings
     sim = cosine_similarity(R)
-    # Anulamos la diagonal (no queremos que el propio usuario pese)
+    # Zero out the diagonal: we don't want a user to weight themselves
     np.fill_diagonal(sim, 0.0)
 
-    # Opcional: nos quedamos con top_k vecinos por usuario (mas fiel al codigo original).
-    # Dejamos una version "soft" (no top_k) porque en la practica da resultados similares
-    # y simplifica. Si quieres la version estricta top_k, se puede hacer un argsort.
+    # Optional: keep only top_k neighbors per user (closer to the original code).
+    # We default to a "soft" version (no top_k cap) because in practice it gives
+    # similar results and is simpler. For the strict top_k version, use argsort.
     if top_k is not None and top_k > 0:
-        # Para cada fila, dejamos 0 todas las similitudes excepto las top_k mayores
+        # For each row, set to 0 all similarities except the top_k largest
         n_users = sim.shape[0]
         top_k = min(top_k, n_users - 1)
-        # argsort ascendente: los indices de los mas pequenos primero
+        # ascending argsort: indices of the smallest values come first
         idx_small = np.argsort(sim, axis=1)[:, : n_users - top_k]
         rows = np.repeat(np.arange(n_users), idx_small.shape[1])
         cols = idx_small.flatten()
         sim[rows, cols] = 0.0
 
-    # Numerador y denominador de la media ponderada
+    # Numerator and denominator of the weighted average
     num = sim @ R      # (U x M)
-    den = sim @ M      # (U x M) suma de similitudes de vecinos que vieron cada peli
+    den = sim @ M      # (U x M) sum of similarities of neighbors who rated each movie
     with np.errstate(divide="ignore", invalid="ignore"):
         score = np.where(den > 0, num / den, np.nan)
 
@@ -250,7 +250,7 @@ def _build_user_sim_scores(
         columns=user_movie.columns,
     )
 
-    # Pasamos a formato largo para que sea un lookup barato por (user_id, movie_id)
+    # Convert to long format for cheap lookup by (user_id, movie_id)
     long = (
         user_sim_df.stack(future_stack=True)
         .dropna()
@@ -269,15 +269,15 @@ def _build_nmf_features(
     random_state: int = 42,
 ) -> pd.DataFrame:
     """
-    Factoriza la matriz user-movie con NMF y devuelve un lookup largo
-    (user_id, movie_id -> nmf_score) con el rating RECONSTRUIDO.
+    Factorizes the user-movie matrix with NMF and returns a long-format
+    lookup (user_id, movie_id -> nmf_score) holding the RECONSTRUCTED rating.
 
-    Si sklearn no esta disponible, devuelve un DataFrame vacio y el feature
-    se rellenara con global_mean en _add_features (no se rompe el pipeline).
+    If sklearn is unavailable, returns an empty DataFrame and the feature
+    will be filled with global_mean inside _add_features (pipeline still works).
 
-    Limitacion conocida: rellenamos missings con 0, lo que NMF interpreta como
-    "no le gusta". Es el enfoque simple; un siguiente paso seria usar ALS implicit
-    o Surprise (SVD) que manejan missings correctamente.
+    Known limitation: missing values are filled with 0, which NMF interprets as
+    "the user dislikes". This is the simple approach; a better next step would
+    be implicit-feedback ALS or Surprise (SVD), which handle missings properly.
     """
     if not _HAS_NMF:
         return pd.DataFrame(columns=["user_id", "movie_id", "nmf_score"])
@@ -292,7 +292,7 @@ def _build_nmf_features(
 
     nmf = _SklearnNMF(
         n_components=n_components,
-        init="nndsvd",          # init deterministico, converge mas rapido que 'random'
+        init="nndsvd",          # deterministic init, converges faster than 'random'
         random_state=random_state,
         max_iter=500,
     )
@@ -316,7 +316,7 @@ def _build_nmf_features(
 
 
 # =========================
-# Feature engineering sobre un conjunto
+# Feature engineering on a frame
 # =========================
 def _add_features(
     ratings_frame: pd.DataFrame,
@@ -338,13 +338,13 @@ def _add_features(
 
     df = df.merge(user_sim_lookup, on=["user_id", "movie_id"], how="left")
 
-    # NMF feature (opcional — solo si hay sklearn y se ha computado)
+    # NMF feature (optional — only if sklearn is available and it was computed)
     if nmf_lookup is not None and len(nmf_lookup) > 0:
         df = df.merge(nmf_lookup, on=["user_id", "movie_id"], how="left")
     else:
         df["nmf_score"] = np.nan
 
-    # Imputaciones consistentes (cold start)
+    # Consistent imputations (cold start)
     df["user_avg"] = df["user_avg"].fillna(global_mean)
     df["movie_avg"] = df["movie_avg"].fillna(global_mean)
     df["user_count"] = df["user_count"].fillna(0)
@@ -354,7 +354,7 @@ def _add_features(
     df[genre_columns] = df[genre_columns].fillna(0)
     df["year"] = df["year"].fillna(movies_with_features["year"].median())
 
-    # Interacciones
+    # Interaction features
     df["interaction"] = df["user_avg"] * df["movie_avg"]
     df["diff"] = df["user_avg"] - df["movie_avg"]
     df["abs_diff"] = df["diff"].abs()
@@ -363,7 +363,7 @@ def _add_features(
 
 
 # =========================
-# API publica
+# Public API
 # =========================
 def load_data(
     task: Task = "classification",
@@ -375,49 +375,49 @@ def load_data(
     save_to: Optional[str] = None,
 ) -> RecommenderData:
     """
-    Carga MovieLens y devuelve un RecommenderData listo para entrenar.
+    Loads MovieLens and returns a RecommenderData ready to train.
 
-    Parametros
+    Parameters
     ----------
-    task : 'classification' o 'regression'
-        - classification: y = 1 si rating >= liked_threshold, si no 0
+    task : 'classification' or 'regression'
+        - classification: y = 1 if rating >= liked_threshold, else 0
         - regression:     y = rating (float 0.5 - 5.0)
-    data_dir : ruta a la carpeta con ratings.csv y movies.csv
-    liked_threshold : umbral del 'me gusta' para clasificacion
-    top_k_similar : nº de vecinos usados en user_sim_score (None o 0 = todos)
-    min_ratings_per_user : minimo de ratings por usuario para ser incluido
-    nmf_components : nº de factores latentes del NMF (pon 0 para desactivar NMF)
-    save_to : si se pasa un path, guarda X_train, X_test, y_train, y_test como csv.
+    data_dir : path to the folder with ratings.csv and movies.csv
+    liked_threshold : 'liked' threshold for classification
+    top_k_similar : number of neighbors used in user_sim_score (None or 0 = all)
+    min_ratings_per_user : minimum ratings per user to be included
+    nmf_components : number of NMF latent factors (set to 0 to disable NMF)
+    save_to : if a path is passed, saves X_train, X_test, y_train, y_test as csv.
 
-    Devuelve
-    --------
+    Returns
+    -------
     RecommenderData
     """
     if task not in ("classification", "regression"):
-        raise ValueError(f"task debe ser 'classification' o 'regression', recibi {task!r}")
+        raise ValueError(f"task must be 'classification' or 'regression', got {task!r}")
 
-    # 1. Cargar raw
+    # 1. Raw load
     ratings, movies = _load_raw(data_dir)
 
-    # 2. Features de peliculas
+    # 2. Movie features
     movies_feat, genre_columns = _build_movies_with_features(movies)
 
-    # 3. Split leave-last-out
+    # 3. Leave-last-out split
     train, test = _leave_last_out_split(ratings, min_ratings_per_user=min_ratings_per_user)
 
-    # 4. Stats SOLO con train
+    # 4. Train-only stats
     user_stats, movie_stats, global_mean = _fit_train_stats(train)
 
-    # 5. User similarity scores (vectorizado) a partir de train
+    # 5. User similarity scores (vectorized) from train
     user_sim_lookup = _build_user_sim_scores(train, top_k=top_k_similar)
 
-    # 5b. NMF latent factors a partir de train
+    # 5b. NMF latent factors from train
     if nmf_components and nmf_components > 0:
         nmf_lookup = _build_nmf_features(train, n_components=nmf_components)
     else:
         nmf_lookup = pd.DataFrame(columns=["user_id", "movie_id", "nmf_score"])
 
-    # 6. Feature engineering en ambos conjuntos
+    # 6. Feature engineering on both frames
     train_fe = _add_features(
         train, movies_feat, user_stats, movie_stats,
         global_mean, user_sim_lookup, genre_columns,
@@ -429,7 +429,7 @@ def load_data(
         nmf_lookup=nmf_lookup,
     )
 
-    # 7. Definir feature_columns y target
+    # 7. Define feature_columns and target
     base_features = [
         "user_avg", "user_count",
         "movie_avg", "movie_count",
@@ -448,7 +448,7 @@ def load_data(
     X_train = train_fe[feature_columns].copy()
     X_test = test_fe[feature_columns].copy()
 
-    # 8. Persistencia opcional
+    # 8. Optional persistence
     if save_to is not None:
         os.makedirs(save_to, exist_ok=True)
         X_train.to_csv(os.path.join(save_to, "X_train.csv"), index=False)
@@ -476,7 +476,7 @@ def load_data(
 
 
 # =========================
-# Helper para construir features de candidatos (peliculas no vistas)
+# Helper to build candidate features (unseen movies)
 # =========================
 def build_candidate_features(
     data: RecommenderData,
@@ -484,11 +484,11 @@ def build_candidate_features(
     candidate_movie_ids: Optional[List[int]] = None,
 ) -> pd.DataFrame:
     """
-    Genera X para todos los pares (user_id, movie_id) candidatos, util para
-    producir recomendaciones top-K con cualquiera de los modelos.
+    Builds X for all (user_id, movie_id) candidate pairs. Useful for producing
+    top-K recommendations with any of the trained models.
 
-    Si candidate_movie_ids es None, usa todas las peliculas no vistas por el usuario
-    en train.
+    If candidate_movie_ids is None, uses all movies the user has not seen
+    in train.
     """
     if candidate_movie_ids is None:
         seen = data.train_ratings.loc[
@@ -502,11 +502,11 @@ def build_candidate_features(
         "movie_id": candidate_movie_ids,
     })
 
-    # Usamos los lookups COMPLETOS (construidos en load_data con TODAS las
-    # parejas user-movie con score calculable, incluidas las que el usuario
-    # no ha visto). Esto es crucial para ranking de candidatos: si solo
-    # tirasemos de train_ratings, user_sim_score y nmf_score serian constantes
-    # en candidatos no vistos y el modelo perderia capacidad de discriminar.
+    # Use the FULL lookups (built in load_data with ALL user-movie pairs that
+    # have a computable score, including unseen movies). This is critical for
+    # candidate ranking: if we only used train_ratings, user_sim_score and
+    # nmf_score would be constant on unseen candidates and the model would
+    # lose discriminative power.
     candidates = _add_features(
         candidates,
         data.movies,

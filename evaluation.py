@@ -2,31 +2,31 @@
 evaluation.py
 =============
 
-Metricas de ranking para sistemas de recomendacion:
+Ranking metrics for recommender systems:
     - precision_at_k
     - recall_at_k
     - hit_rate_at_k
-    - ndcg_at_k  (con relevancia graduada usando el rating real)
+    - ndcg_at_k  (graded relevance using the actual rating)
     - map_at_k
 
-Y un wrapper `evaluate_ranker` que aplica todas estas metricas a un modelo
-ajustado, por usuario, y devuelve los promedios.
+Plus a wrapper `evaluate_ranker` that applies all metrics to a fitted model,
+per user, and returns the averages.
 
-Filosofia
----------
-Un recomendador bueno coloca los items que el usuario QUIERE VER en la cima
-de la lista. AUC o RMSE no capturan esto; necesitas metricas de top-K. Por
-eso existe este modulo.
-
-Convencion
+Philosophy
 ----------
-- `true_items`: iterable de movie_ids que son relevantes para el usuario
-  (p.ej. los que rato con >= 4 en test, o simplemente los que aparecen en
-  test si lo tratamos como implicit).
-- `pred_items`: lista ordenada (mayor a menor score) de movie_ids
-  recomendados por el modelo.
-- `true_relevance`: dict opcional {movie_id: rating} si quieres que NDCG
-  use relevancia graduada; si no se pasa, se usa relevancia binaria (0/1).
+A good recommender places the items the user WANTS TO SEE at the top of the
+list. AUC and RMSE do not capture this; you need top-K metrics. That's why
+this module exists.
+
+Conventions
+-----------
+- `true_items`: iterable of movie_ids that are relevant for the user
+  (e.g. the ones rated >= 4 in test, or simply the ones present in test
+  if treating it as implicit feedback).
+- `pred_items`: list ordered by score descending, of movie_ids
+  recommended by the model.
+- `true_relevance`: optional dict {movie_id: rating} if you want NDCG
+  to use graded relevance; otherwise binary (0/1) is used.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ import pandas as pd
 
 
 # =========================
-# Metricas puntuales por usuario
+# Per-user metrics
 # =========================
 def precision_at_k(true_items: Iterable[int], pred_items: Sequence[int], k: int) -> float:
     if k <= 0 or len(pred_items) == 0:
@@ -59,7 +59,7 @@ def recall_at_k(true_items: Iterable[int], pred_items: Sequence[int], k: int) ->
 
 
 def hit_rate_at_k(true_items: Iterable[int], pred_items: Sequence[int], k: int) -> float:
-    """1 si al menos uno de los true aparece en top-K, 0 si no."""
+    """1 if at least one of the true items appears in top-K, 0 otherwise."""
     true_set = set(true_items)
     return float(any(item in true_set for item in pred_items[:k]))
 
@@ -67,7 +67,7 @@ def hit_rate_at_k(true_items: Iterable[int], pred_items: Sequence[int], k: int) 
 def average_precision_at_k(
     true_items: Iterable[int], pred_items: Sequence[int], k: int
 ) -> float:
-    """AP@K usado para MAP."""
+    """AP@K used for MAP."""
     true_set = set(true_items)
     if len(true_set) == 0:
         return 0.0
@@ -87,7 +87,7 @@ def ndcg_at_k(
     true_items: Optional[Iterable[int]] = None,
 ) -> float:
     """
-    NDCG@K con relevancia graduada si se pasa true_relevance, binaria si no.
+    NDCG@K with graded relevance if true_relevance is passed, binary otherwise.
 
     Formula: DCG = sum_i (2^rel_i - 1) / log2(i + 1)
              NDCG = DCG / IDCG
@@ -115,7 +115,7 @@ def ndcg_at_k(
 
 
 # =========================
-# Wrapper a nivel de modelo
+# Model-level wrapper
 # =========================
 def _rank_candidates_for_user(
     user_id: int,
@@ -126,8 +126,8 @@ def _rank_candidates_for_user(
     task: str,
 ) -> List[int]:
     """
-    Devuelve la lista de candidate_movie_ids ordenada por score descendente segun
-    el modelo.
+    Returns the list of candidate_movie_ids sorted by score descending
+    according to the model.
     """
     candidates_df = build_features_fn(user_id=user_id, candidate_movie_ids=candidate_movie_ids)
     X = candidates_df[feature_columns]
@@ -152,24 +152,24 @@ def evaluate_ranker(
     verbose: bool = False,
 ) -> Dict[str, float]:
     """
-    Evalua un modelo sklearn-like sobre data.test_ratings usando metricas de ranking.
+    Evaluates a sklearn-like model against data.test_ratings using ranking metrics.
 
-    Parametros
+    Parameters
     ----------
-    model : modelo ajustado con .predict o .predict_proba
-    data : RecommenderData (salida de data_loader.load_data)
-    k : top-K para las metricas
-    liked_threshold : umbral para considerar un rating real como "relevante"
-    max_users : si no es None, evalua solo los primeros `max_users` usuarios
-                (util para iterar rapido)
-    candidate_strategy : 'unseen' -> todas las pelis no vistas en train
-                         'test_plus_sample' -> la peli de test + 99 negativas
-                         (estandar leave-one-out con muestreo negativo)
-    verbose : imprime progreso cada 50 usuarios
+    model : fitted model with .predict or .predict_proba
+    data : RecommenderData (output of data_loader.load_data)
+    k : top-K for the metrics
+    liked_threshold : threshold to consider a real rating as "relevant"
+    max_users : if not None, only evaluate the first `max_users` users
+                (useful for fast iteration)
+    candidate_strategy : 'unseen' -> all movies the user has not rated in train
+                         'test_plus_sample' -> the test movie + 99 negatives
+                         (standard leave-one-out with negative sampling)
+    verbose : prints progress every 50 users
 
-    Devuelve
-    --------
-    dict con 'precision@k', 'recall@k', 'ndcg@k', 'hit@k', 'map@k'
+    Returns
+    -------
+    dict with 'precision@k', 'recall@k', 'ndcg@k', 'hit@k', 'map@k'
     """
     from data_loader import build_candidate_features
 
@@ -195,7 +195,7 @@ def evaluate_ranker(
         true_items = true_liked["movie_id"].tolist()
         true_relevance = dict(zip(true_liked["movie_id"], true_liked["rating"]))
 
-        # Construir candidatos
+        # Build candidates
         if candidate_strategy == "test_plus_sample":
             seen = data.train_ratings.loc[
                 data.train_ratings["user_id"] == user_id, "movie_id"
@@ -231,7 +231,7 @@ def evaluate_ranker(
         maps.append(average_precision_at_k(true_items, ranked, k))
 
         if verbose and (i + 1) % 50 == 0:
-            print(f"  [eval] {i + 1}/{len(users)} usuarios procesados")
+            print(f"  [eval] {i + 1}/{len(users)} users processed")
 
     return {
         f"precision@{k}": float(np.mean(precisions)) if precisions else 0.0,
@@ -253,7 +253,7 @@ def pretty_print_metrics(name: str, metrics: Dict[str, float]) -> None:
 
 
 if __name__ == "__main__":
-    # Smoke test de las metricas puras
+    # Quick smoke test of the pure metrics
     true = [10, 20, 30]
     pred = [10, 5, 20, 40, 30, 50, 60, 70, 80, 90]
     print("P@5   =", precision_at_k(true, pred, 5))
